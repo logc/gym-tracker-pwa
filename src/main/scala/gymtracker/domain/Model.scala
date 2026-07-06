@@ -66,6 +66,11 @@ final case class RepRange(min: Int, max: Int)
 
 final case class LevelDefaults(sets: Int, reps: RepRange, tempo: Tempo, restSeconds: Int, exerciseCount: Int)
 
+final case class WorkoutPreferences(daysPerWeek: Int, sessionNumber: Int, targetMinutes: Int):
+  def normalized: WorkoutPreferences =
+    val days = daysPerWeek.max(2).min(7)
+    copy(daysPerWeek = days, sessionNumber = sessionNumber.max(1).min(days), targetMinutes = targetMinutes.max(20).min(120))
+
 final case class Machine(
     id: String,
     name: String,
@@ -97,15 +102,19 @@ final case class PlannedExercise(
     sets: Int,
     reps: Int,
     tempo: Tempo,
-    restSeconds: Int
-)
+    restSeconds: Int,
+    durationMinutes: Option[Int] = None
+):
+  def isTimed: Boolean = durationMinutes.exists(_ > 0)
 
 final case class PlannedWorkout(
     id: String,
     date: String,
     targetMuscles: List[MuscleGroup],
     fitnessLevel: FitnessLevel,
-    exercises: List[PlannedExercise]
+    exercises: List[PlannedExercise],
+    preferences: WorkoutPreferences = WorkoutPreferences(3, 1, 45),
+    estimatedMinutes: Int = 0
 )
 
 enum CueMode:

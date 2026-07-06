@@ -12,6 +12,7 @@ enum Screen:
 final case class AppModel(
     machines: List[Machine],
     fitnessLevel: FitnessLevel,
+    workoutPreferences: WorkoutPreferences,
     cueMode: CueMode,
     autoStartSets: Boolean,
     workout: Option[PlannedWorkout],
@@ -44,7 +45,7 @@ object Main:
     render()
 
   private def defaultModel: AppModel =
-    AppModel(DefaultMachines.all, FitnessLevel.Intermediate, CueMode.Beep, autoStartSets = false, None, Screen.Today, PlayerState(), DefaultMachines.version)
+    AppModel(DefaultMachines.all, FitnessLevel.Intermediate, WorkoutPreferences(3, 1, 45), CueMode.Beep, autoStartSets = false, None, Screen.Today, PlayerState(), DefaultMachines.version)
 
   private def render(): Unit =
     val root = dom.document.getElementById("app")
@@ -93,13 +94,14 @@ object Main:
 
   private def todayView(model: AppModel): String =
     val today = browserToday()
-    val targets = TrainingDefaults.targetsFor(today.weekday).map(_.label).mkString(", ")
+    val preferences = model.workoutPreferences.normalized
+    val targets = TrainingDefaults.targetsFor(preferences).map(_.label).mkString(", ")
     val knownCount = model.machines.count(!_.isUnknown)
     s"""
       <div class="panel">
-        <p class="label">Target muscles</p>
+        <p class="label">Session ${preferences.sessionNumber} of ${preferences.daysPerWeek}</p>
         <h2>${escape(targets)}</h2>
-        <p>${escape(today.weekday.label.capitalize)} · ${model.fitnessLevel.label}</p>
+        <p>${escape(today.weekday.label.capitalize)} · ${model.fitnessLevel.label} · about ${preferences.targetMinutes} min</p>
       </div>
       <div class="action-grid">
         <button class="primary" id="generate-workout">Generate workout</button>
@@ -109,7 +111,7 @@ object Main:
       <div class="stats">
         <span>${model.machines.size} machines</span>
         <span>${knownCount} classified</span>
-        <span>${model.workout.map(_.exercises.size).getOrElse(0)} planned</span>
+        <span>${model.workout.map(_.estimatedMinutes).getOrElse(0)} min planned</span>
       </div>
     """
 
@@ -163,11 +165,19 @@ object Main:
       case Some(workout) if workout.exercises.isEmpty =>
         """<p class="empty">No classified machines match yet. Add or classify machines first.</p>"""
       case Some(workout) =>
-        workout.exercises.map(exerciseCard).mkString +
+        val summary = s"""<div class="panel"><p class="label">Estimated duration</p><h2>${workout.estimatedMinutes} min</h2><p>Target: ${workout.preferences.targetMinutes} min · Session ${workout.preferences.sessionNumber} of ${workout.preferences.daysPerWeek}</p></div>"""
+        summary + workout.exercises.map(exerciseCard).mkString +
           """<div class="action-grid"><button class="primary" id="regenerate-workout">Regenerate</button><button id="routine-start-workout">Start workout</button></div>"""
     s"""<div class="routine-list">$body</div>"""
 
   private def exerciseCard(exercise: PlannedExercise): String =
+    val metrics =
+      exercise.durationMinutes match
+        case Some(minutes) => s"""<span>${minutes} min</span><span>timed</span>"""
+        case None          => s"""<span>${exercise.sets} sets</span><span>${exercise.reps} reps</span><span>${exercise.tempo}</span><span>${exercise.restSeconds}s rest</span>"""
+    val replace =
+      if exercise.durationMinutes.isDefined then ""
+      else s"""<button data-replace-exercise="${exercise.id}">Replace</button>"""
     s"""
       <article class="card exercise-card">
         <div>
@@ -175,12 +185,9 @@ object Main:
           <p>${exercise.muscles.map(_.label).mkString(", ")} · ${exercise.movementPattern.label}</p>
         </div>
         <div class="pill-row">
-          <span>${exercise.sets} sets</span>
-          <span>${exercise.reps} reps</span>
-          <span>${exercise.tempo}</span>
-          <span>${exercise.restSeconds}s rest</span>
+          $metrics
         </div>
-        <button data-replace-exercise="${exercise.id}">Replace</button>
+        $replace
       </article>
     """
 
@@ -196,6 +203,7 @@ object Main:
         val status =
           if player.finished then "Workout complete"
           else if player.resting then s"Rest ${player.restRemaining}s"
+          else if player.running && exercise.isTimed then s"${player.phaseRemaining}s remaining"
           else if player.running then s"${player.phase} · ${player.phaseRemaining}s"
           else "Ready"
         s"""
@@ -203,10 +211,7 @@ object Main:
             <p class="label">Exercise ${player.exerciseIndex + 1} of ${workout.exercises.size}</p>
             <h2>${escape(exercise.machineName)}</h2>
             <p>${exercise.muscles.map(_.label).mkString(", ")}</p>
-            <div class="player-meter">
-              <span>Set ${player.setNumber}/${exercise.sets}</span>
-              <span>Rep ${player.repNumber}/${exercise.reps}</span>
-            </div>
+            ${playerMeter(player, exercise)}
             <div class="phase">${escape(status)}</div>
             <div class="action-grid">
               <button class="primary" id="start-set" ${if player.running || player.resting || player.finished then "disabled" else ""}>Start set</button>
@@ -215,6 +220,23 @@ object Main:
               <button id="next-exercise" ${if player.finished then "disabled" else ""}>Next exercise</button>
             </div>
           </section>
+        """
+
+  private def playerMeter(player: PlayerState, exercise: PlannedExercise): String =
+    exercise.durationMinutes match
+      case Some(minutes) =>
+        s"""
+          <div class="player-meter">
+            <span>${minutes} min block</span>
+            <span>${if player.running then player.phaseRemaining.toString + "s" else "Ready"}</span>
+          </div>
+        """
+      case None =>
+        s"""
+          <div class="player-meter">
+            <span>Set ${player.setNumber}/${exercise.sets}</span>
+            <span>Rep ${player.repNumber}/${exercise.reps}</span>
+          </div>
         """
 
   private def settingsView(model: AppModel): String =
@@ -227,10 +249,32 @@ object Main:
       s"""<option value="${mode.label}" $selected>${mode.label}</option>"""
     }.mkString
     val auto = if model.autoStartSets then "checked" else ""
+    val preferences = model.workoutPreferences.normalized
+    val dayOptions = (2 to 7).map { days =>
+      val selected = if days == preferences.daysPerWeek then "selected" else ""
+      s"""<option value="$days" $selected>$days days/week</option>"""
+    }.mkString
+    val sessionOptions = (1 to preferences.daysPerWeek).map { session =>
+      val selected = if session == preferences.sessionNumber then "selected" else ""
+      s"""<option value="$session" $selected>Session $session</option>"""
+    }.mkString
+    val durationOptions = List(30, 45, 60, 75, 90).map { minutes =>
+      val selected = if minutes == preferences.targetMinutes then "selected" else ""
+      s"""<option value="$minutes" $selected>$minutes minutes</option>"""
+    }.mkString
     s"""
       <div class="panel">
         <label class="field">Fitness level
           <select id="fitness-level">$levelOptions</select>
+        </label>
+        <label class="field">Training frequency
+          <select id="training-days">$dayOptions</select>
+        </label>
+        <label class="field">Workout to generate
+          <select id="session-number">$sessionOptions</select>
+        </label>
+        <label class="field">Target duration
+          <select id="target-minutes">$durationOptions</select>
         </label>
         <label class="field">Cue mode
           <select id="cue-mode">$cueOptions</select>
@@ -311,6 +355,25 @@ object Main:
         CueMode.fromLabel(selected).foreach(mode => setModel(model.copy(cueMode = mode)))
       )
     }
+    Option(dom.document.getElementById("training-days")).foreach { node =>
+      node.addEventListener("change", _ =>
+        val days = node.asInstanceOf[dom.html.Select].value.toIntOption.getOrElse(model.workoutPreferences.daysPerWeek)
+        val nextPreferences = model.workoutPreferences.copy(daysPerWeek = days).normalized
+        setModel(model.copy(workoutPreferences = nextPreferences))
+      )
+    }
+    Option(dom.document.getElementById("session-number")).foreach { node =>
+      node.addEventListener("change", _ =>
+        val session = node.asInstanceOf[dom.html.Select].value.toIntOption.getOrElse(model.workoutPreferences.sessionNumber)
+        setModel(model.copy(workoutPreferences = model.workoutPreferences.copy(sessionNumber = session).normalized))
+      )
+    }
+    Option(dom.document.getElementById("target-minutes")).foreach { node =>
+      node.addEventListener("change", _ =>
+        val minutes = node.asInstanceOf[dom.html.Select].value.toIntOption.getOrElse(model.workoutPreferences.targetMinutes)
+        setModel(model.copy(workoutPreferences = model.workoutPreferences.copy(targetMinutes = minutes).normalized))
+      )
+    }
     Option(dom.document.getElementById("auto-start")).foreach { node =>
       node.addEventListener("change", _ =>
         setModel(model.copy(autoStartSets = node.asInstanceOf[dom.html.Input].checked))
@@ -324,7 +387,7 @@ object Main:
     }
 
   private def generateWorkout(): Unit =
-    val workout = WorkoutGenerator.generate(model.machines, browserToday(), model.fitnessLevel)
+    val workout = WorkoutGenerator.generate(model.machines, browserToday(), model.fitnessLevel, model.workoutPreferences)
     setModel(model.copy(workout = Some(workout), screen = Screen.Routine, player = PlayerState()))
 
   private def startSet(): Unit =
@@ -441,12 +504,29 @@ object Storage:
   def save(model: AppModel): Unit =
     val machines = model.machines.map(encodeMachine).mkString(delimiter)
     val workout = model.workout.map(encodeWorkout).getOrElse("")
-    val value = List(model.fitnessLevel.label, model.cueMode.label, model.autoStartSets.toString, machines, workout, model.defaultCatalogVersion.toString).map(enc).mkString(field)
+    val preferences = model.workoutPreferences.normalized
+    val value = List(model.fitnessLevel.label, model.cueMode.label, model.autoStartSets.toString, machines, workout, model.defaultCatalogVersion.toString, encodePreferences(preferences)).map(enc).mkString(field)
     dom.window.localStorage.setItem("gym-routine-generator-v1", value)
 
   def load(): Option[AppModel] =
     Option(dom.window.localStorage.getItem("gym-routine-generator-v1")).flatMap { raw =>
       raw.split(field, -1).toList match
+        case level :: cue :: auto :: machinesRaw :: workoutRaw :: versionRaw :: preferencesRaw :: Nil =>
+          val machines = dec(machinesRaw).split(delimiter).toList.filter(_.nonEmpty).flatMap(decodeMachine)
+          val workout = decodeWorkout(dec(workoutRaw))
+          val savedVersion = dec(versionRaw).toIntOption.getOrElse(0)
+          val preferences = decodePreferences(dec(preferencesRaw))
+          Some(withImportedDefaults(AppModel(
+            machines,
+            FitnessLevel.fromLabel(dec(level)).getOrElse(FitnessLevel.Intermediate),
+            preferences,
+            CueMode.fromLabel(dec(cue)).getOrElse(CueMode.Beep),
+            dec(auto).toBooleanOption.getOrElse(false),
+            workout,
+            Screen.Today,
+            PlayerState(),
+            savedVersion
+          )))
         case level :: cue :: auto :: machinesRaw :: workoutRaw :: versionRaw :: Nil =>
           val machines = dec(machinesRaw).split(delimiter).toList.filter(_.nonEmpty).flatMap(decodeMachine)
           val workout = decodeWorkout(dec(workoutRaw))
@@ -454,6 +534,7 @@ object Storage:
           Some(withImportedDefaults(AppModel(
             machines,
             FitnessLevel.fromLabel(dec(level)).getOrElse(FitnessLevel.Intermediate),
+            WorkoutPreferences(3, 1, 45),
             CueMode.fromLabel(dec(cue)).getOrElse(CueMode.Beep),
             dec(auto).toBooleanOption.getOrElse(false),
             workout,
@@ -467,6 +548,7 @@ object Storage:
           Some(withImportedDefaults(AppModel(
             machines,
             FitnessLevel.fromLabel(dec(level)).getOrElse(FitnessLevel.Intermediate),
+            WorkoutPreferences(3, 1, 45),
             CueMode.fromLabel(dec(cue)).getOrElse(CueMode.Beep),
             dec(auto).toBooleanOption.getOrElse(false),
             workout,
@@ -515,13 +597,25 @@ object Storage:
       workout.date,
       workout.targetMuscles.map(_.label).mkString(","),
       workout.fitnessLevel.label,
-      workout.exercises.map(encodeExercise).mkString(delimiter)
+      workout.exercises.map(encodeExercise).mkString(delimiter),
+      encodePreferences(workout.preferences),
+      workout.estimatedMinutes.toString
     ).map(enc).mkString(field)
 
   private def decodeWorkout(raw: String): Option[PlannedWorkout] =
     if raw.isEmpty then None
     else
       raw.split(field, -1).toList match
+        case id :: date :: targets :: level :: exercises :: preferences :: estimated :: Nil =>
+          Some(PlannedWorkout(
+            dec(id),
+            dec(date),
+            decodeMuscles(dec(targets)),
+            FitnessLevel.fromLabel(dec(level)).getOrElse(FitnessLevel.Intermediate),
+            dec(exercises).split(delimiter).toList.filter(_.nonEmpty).flatMap(decodeExercise),
+            decodePreferences(dec(preferences)),
+            dec(estimated).toIntOption.getOrElse(0)
+          ))
         case id :: date :: targets :: level :: exercises :: Nil =>
           Some(PlannedWorkout(
             dec(id),
@@ -542,11 +636,27 @@ object Storage:
       exercise.sets.toString,
       exercise.reps.toString,
       exercise.tempo.toString,
-      exercise.restSeconds.toString
+      exercise.restSeconds.toString,
+      exercise.durationMinutes.map(_.toString).getOrElse("")
     ).map(enc).mkString("|")
 
   private def decodeExercise(raw: String): Option[PlannedExercise] =
     raw.split("\\|", -1).toList match
+      case id :: machineId :: name :: muscles :: pattern :: sets :: reps :: tempo :: rest :: duration :: Nil =>
+        TempoParser.parse(dec(tempo)).toOption.map { parsedTempo =>
+          PlannedExercise(
+            dec(id),
+            dec(machineId),
+            dec(name),
+            decodeMuscles(dec(muscles)),
+            MovementPattern.fromLabel(dec(pattern)).getOrElse(MovementPattern.Unknown),
+            dec(sets).toIntOption.getOrElse(3),
+            dec(reps).toIntOption.getOrElse(10),
+            parsedTempo,
+            dec(rest).toIntOption.getOrElse(90),
+            dec(duration).toIntOption
+          )
+        }
       case id :: machineId :: name :: muscles :: pattern :: sets :: reps :: tempo :: rest :: Nil =>
         TempoParser.parse(dec(tempo)).toOption.map { parsedTempo =>
           PlannedExercise(
@@ -562,6 +672,16 @@ object Storage:
           )
         }
       case _ => None
+
+  private def encodePreferences(preferences: WorkoutPreferences): String =
+    val normalized = preferences.normalized
+    List(normalized.daysPerWeek.toString, normalized.sessionNumber.toString, normalized.targetMinutes.toString).mkString(",")
+
+  private def decodePreferences(raw: String): WorkoutPreferences =
+    raw.split(",", -1).toList match
+      case days :: session :: minutes :: Nil =>
+        WorkoutPreferences(days.toIntOption.getOrElse(3), session.toIntOption.getOrElse(1), minutes.toIntOption.getOrElse(45)).normalized
+      case _ => WorkoutPreferences(3, 1, 45)
 
   private def decodeMuscles(raw: String): List[MuscleGroup] =
     raw.split(",").toList.flatMap(MuscleGroup.fromLabel)

@@ -22,7 +22,9 @@ sbt test
 - Add, edit, and delete workout machines.
 - Infer muscle groups and movement pattern from common machine names.
 - Manually correct classifications.
-- Generate day-specific routines from the default weekly split.
+- Generate a selected session from a 2-7 day weekly split.
+- Include warm-up mobility, easy cardio, and a core finisher in generated routines.
+- Adjust generated routine length toward the selected target duration.
 - Apply beginner/intermediate/advanced set, rep, tempo, and rest defaults.
 - Replace individual generated exercises.
 - Follow a workout player with set/rep/tempo/rest state and beep, voice, or silent cues.
