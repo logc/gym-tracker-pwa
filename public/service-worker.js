@@ -1,14 +1,23 @@
-const CACHE_NAME = "gym-routine-generator-v1";
-const ASSETS = [
+const CACHE_NAME = "gym-routine-generator-v2";
+const CORE_ASSETS = [
   "../index.html",
   "./styles.css",
   "./manifest.webmanifest",
-  "./icon.svg",
+  "./icon.svg"
+];
+const SCRIPT_ASSETS = [
+  "../main.js",
   "../target/scala-3.8.4/gym-tracker-pwa-fastopt/main.js"
 ];
 
 self.addEventListener("install", event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache =>
+      cache.addAll(CORE_ASSETS).then(() =>
+        Promise.all(SCRIPT_ASSETS.map(asset => cache.add(asset).catch(() => undefined)))
+      )
+    )
+  );
 });
 
 self.addEventListener("activate", event => {

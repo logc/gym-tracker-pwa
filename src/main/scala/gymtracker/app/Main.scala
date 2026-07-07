@@ -27,6 +27,8 @@ final case class PlayerState(
     repNumber: Int = 0,
     phase: String = "ready",
     phaseRemaining: Int = 0,
+    preparing: Boolean = false,
+    countdownRemaining: Int = 0,
     running: Boolean = false,
     resting: Boolean = false,
     restRemaining: Int = 0,
@@ -35,6 +37,8 @@ final case class PlayerState(
 
 object Main:
   private val storageKey = "gym-routine-generator-v1"
+  private val setCountdownSeconds = 5
+  private val cueGain = 0.18
   private var model: AppModel = Storage.load().getOrElse(defaultModel)
   private var intervalHandle: Option[Int] = None
   private var audioContext: Option[dom.AudioContext] = None
@@ -202,6 +206,7 @@ object Main:
         val exercise = workout.exercises(math.min(player.exerciseIndex, workout.exercises.size - 1))
         val status =
           if player.finished then "Workout complete"
+          else if player.preparing then s"Starting in ${player.countdownRemaining}s"
           else if player.resting then s"Rest ${player.restRemaining}s"
           else if player.running && exercise.isTimed then s"${player.phaseRemaining}s remaining"
           else if player.running then s"${player.phase} · ${player.phaseRemaining}s"
@@ -214,8 +219,8 @@ object Main:
             ${playerMeter(player, exercise)}
             <div class="phase">${escape(status)}</div>
             <div class="action-grid">
-              <button class="primary" id="start-set" ${if player.running || player.resting || player.finished then "disabled" else ""}>Start set</button>
-              <button id="pause-player" ${if player.running then "" else "disabled"}>Pause</button>
+              <button class="primary" id="start-set" ${if player.preparing || player.running || player.resting || player.finished then "disabled" else ""}>Start set</button>
+              <button id="pause-player" ${if player.preparing || player.running then "" else "disabled"}>Pause</button>
               <button id="finish-set" ${if player.finished then "disabled" else ""}>Finish set</button>
               <button id="next-exercise" ${if player.finished then "disabled" else ""}>Next exercise</button>
             </div>
@@ -228,7 +233,7 @@ object Main:
         s"""
           <div class="player-meter">
             <span>${minutes} min block</span>
-            <span>${if player.running then player.phaseRemaining.toString + "s" else "Ready"}</span>
+            <span>${if player.preparing then player.countdownRemaining.toString + "s" else if player.running then player.phaseRemaining.toString + "s" else "Ready"}</span>
           </div>
         """
       case None =>
@@ -395,13 +400,22 @@ object Main:
     currentExercise.foreach { exercise =>
       val phases = List("down" -> exercise.tempo.eccentric, "hold" -> exercise.tempo.pause, "up" -> exercise.tempo.concentric).filter(_._2 > 0)
       phaseQueue = List.fill(exercise.reps)(phases).flatten
-      advancePhase()
       clearTimer()
+      setModel(model.copy(player = model.player.copy(preparing = true, countdownRemaining = setCountdownSeconds, running = false, phase = "ready")))
       intervalHandle = Some(dom.window.setInterval(() => tick(), 1000))
     }
 
   private def tick(): Unit =
-    if model.player.resting then
+    if model.player.preparing then
+      val nextRemaining = model.player.countdownRemaining - 1
+      nextRemaining match
+        case 3 => cue("ready")
+        case 2 => cue("set")
+        case 1 => cue("go")
+        case _ => ()
+      if nextRemaining <= 0 then beginSet()
+      else setModel(model.copy(player = model.player.copy(countdownRemaining = nextRemaining)))
+    else if model.player.resting then
       val nextRemaining = model.player.restRemaining - 1
       if nextRemaining <= 0 then
         clearTimer()
@@ -413,6 +427,11 @@ object Main:
       val nextRemaining = model.player.phaseRemaining - 1
       if nextRemaining <= 0 then advancePhase()
       else setModel(model.copy(player = model.player.copy(phaseRemaining = nextRemaining)))
+
+  private def beginSet(): Unit =
+    cue("start")
+    setModel(model.copy(player = model.player.copy(preparing = false, countdownRemaining = 0)))
+    advancePhase()
 
   private def advancePhase(): Unit =
     phaseQueue match
@@ -444,7 +463,7 @@ object Main:
 
   private def pausePlayer(): Unit =
     clearTimer()
-    setModel(model.copy(player = model.player.copy(running = false, phase = "paused")))
+    setModel(model.copy(player = model.player.copy(preparing = false, countdownRemaining = 0, running = false, phase = "paused")))
 
   private def currentExercise: Option[PlannedExercise] =
     model.workout.flatMap(_.exercises.lift(model.player.exerciseIndex))
@@ -463,15 +482,66 @@ object Main:
           synthesis.speak(js.Dynamic.newInstance(ctor)(label))
       case CueMode.Beep =>
         audioContext.foreach { context =>
-          val oscillator = context.createOscillator()
-          val gain = context.createGain()
-          oscillator.frequency.value = if label == "done" then 660 else 440
-          gain.gain.value = 0.08
-          oscillator.connect(gain)
-          gain.connect(context.destination)
-          oscillator.start()
-          oscillator.stop(context.currentTime + 0.12)
+          val startAt = context.currentTime
+          label match
+            case "ready" =>
+              playNotes(context, startAt, List(
+                Note(392.00, 0.00, 0.14),
+                Note(523.25, 0.16, 0.14)
+              ))
+            case "set" =>
+              playNotes(context, startAt, List(
+                Note(523.25, 0.00, 0.10),
+                Note(523.25, 0.14, 0.10)
+              ))
+            case "go" =>
+              playNotes(context, startAt, List(
+                Note(783.99, 0.00, 0.22)
+              ))
+            case "start" =>
+              playNotes(context, startAt, List(
+                Note(523.25, 0.00, 0.11),
+                Note(783.99, 0.12, 0.16)
+              ))
+            case "up" =>
+              playNotes(context, startAt, List(
+                Note(440.00, 0.00, 0.08),
+                Note(554.37, 0.08, 0.08),
+                Note(659.25, 0.16, 0.12)
+              ))
+            case "down" =>
+              playNotes(context, startAt + 0.3, List(
+                Note(659.25, 0.00, 0.08),
+                Note(554.37, 0.08, 0.08),
+                Note(440.00, 0.16, 0.12)
+              ))
+            case "done" =>
+              playNotes(context, startAt, List(
+                Note(659.25, 0.00, 0.16),
+                Note(587.33, 0.18, 0.16),
+                Note(523.25, 0.36, 0.28)
+              ))
+            case _ =>
+              playNotes(context, startAt, List(Note(587.33, 0.00, 0.12)))
         }
+
+  private final case class Note(frequency: Double, offset: Double, duration: Double)
+
+  private def playNotes(context: dom.AudioContext, startAt: Double, notes: List[Note]): Unit =
+    notes.foreach { note =>
+      val oscillator = context.createOscillator()
+      val gain = context.createGain()
+      val noteStart = startAt + note.offset
+      val noteEnd = noteStart + note.duration
+      oscillator.frequency.value = note.frequency
+      gain.gain.setValueAtTime(0.001, noteStart)
+      gain.gain.linearRampToValueAtTime(cueGain, noteStart + 0.015)
+      gain.gain.exponentialRampToValueAtTime(0.001, noteEnd)
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      oscillator.start(noteStart)
+      oscillator.stop(noteEnd + 0.02)
+    }
 
   private def clearTimer(): Unit =
     intervalHandle.foreach(dom.window.clearInterval)
