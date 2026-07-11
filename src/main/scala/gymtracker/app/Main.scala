@@ -42,6 +42,7 @@ object Main:
   private var model: AppModel = Storage.load().getOrElse(defaultModel)
   private var intervalHandle: Option[Int] = None
   private var audioContext: Option[dom.AudioContext] = None
+  private var activeUtterance: Option[js.Dynamic] = None
   private var phaseQueue: List[(String, Int)] = Nil
 
   @JSExportTopLevel("main")
@@ -469,8 +470,16 @@ object Main:
     model.workout.flatMap(_.exercises.lift(model.player.exerciseIndex))
 
   private def ensureAudio(): Unit =
-    if audioContext.isEmpty && model.cueMode == CueMode.Beep then
-      audioContext = Some(new dom.AudioContext())
+    if model.cueMode == CueMode.Beep then ensureBeepContext().foreach(resumeAudioContext)
+
+  private def ensureBeepContext(): Option[dom.AudioContext] =
+    val context =
+      audioContext.filterNot(context => audioContextState(context) == "closed").getOrElse {
+        val created = new dom.AudioContext()
+        audioContext = Some(created)
+        created
+      }
+    Some(context)
 
   private def cue(label: String): Unit =
     model.cueMode match
@@ -479,9 +488,16 @@ object Main:
         val ctor = js.Dynamic.global.SpeechSynthesisUtterance
         val synthesis = js.Dynamic.global.window.speechSynthesis
         if !js.isUndefined(ctor) && !js.isUndefined(synthesis) then
-          synthesis.speak(js.Dynamic.newInstance(ctor)(label))
+          val utterance = js.Dynamic.newInstance(ctor)(voiceCueLabel(label))
+          activeUtterance = Some(utterance)
+          if !js.isUndefined(synthesis.cancel) && (synthesis.speaking.asInstanceOf[Boolean] || synthesis.pending.asInstanceOf[Boolean]) then
+            synthesis.cancel()
+          if !js.isUndefined(synthesis.resume) && synthesis.paused.asInstanceOf[Boolean] then
+            synthesis.resume()
+          synthesis.speak(utterance)
       case CueMode.Beep =>
-        audioContext.foreach { context =>
+        ensureBeepContext().foreach { context =>
+          resumeAudioContext(context)
           val startAt = context.currentTime
           label match
             case "ready" =>
@@ -526,6 +542,21 @@ object Main:
         }
 
   private final case class Note(frequency: Double, offset: Double, duration: Double)
+
+  private def voiceCueLabel(label: String): String =
+    label match
+      case "done" => "Finished"
+      case other  => other.capitalize
+
+  private def audioContextState(context: dom.AudioContext): String =
+    val state = context.asInstanceOf[js.Dynamic].state
+    if js.isUndefined(state) then "" else state.asInstanceOf[String]
+
+  private def resumeAudioContext(context: dom.AudioContext): Unit =
+    val dynamicContext = context.asInstanceOf[js.Dynamic]
+    val state = audioContextState(context)
+    if (state == "suspended" || state == "interrupted") && !js.isUndefined(dynamicContext.resume) then
+      dynamicContext.resume()
 
   private def playNotes(context: dom.AudioContext, startAt: Double, notes: List[Note]): Unit =
     notes.foreach { note =>
